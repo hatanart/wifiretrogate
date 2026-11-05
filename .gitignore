@@ -1,0 +1,9 @@
+# ESP-IDF build output
+build/
+managed_components/
+
+# ESP-IDF configuration: may contain a Wi-Fi password
+sdkconfig
+sdkconfig.old
+
+__pycache__/

@@ -1,0 +1,77 @@
+menu "WifiRetroGate"
+
+    config WRG_WIFI_SSID
+        string "Initial Wi-Fi network (optional, saved on first boot)"
+        default ""
+        help
+            Normally networks are added in setup mode. A network entered here
+            is saved on first boot if no networks are saved yet.
+
+    config WRG_WIFI_PASSWORD
+        string "Initial Wi-Fi password (empty for an open network)"
+        default ""
+
+    config WRG_SERVICE_IP
+        string "Service address (Telnet from the retro machine)"
+        default "192.0.2.1"
+        help
+            Must not exist on the LAN. 192.0.2.0/24 is reserved for
+            documentation (RFC 5737) and never used on real networks.
+
+    config WRG_BUTTON_GPIO
+        int "Setup button GPIO (button to GND; -1 = no button)"
+        default 4
+        help
+            Long press (2 s) enters or leaves setup mode, short press wakes
+            the display. Uses the internal pull-up.
+
+endmenu
+
+menu "WifiRetroGate display"
+
+    config WRG_OLED_ENABLE
+        bool "I2C OLED status display"
+        default y
+
+    config WRG_OLED_SDA
+        int "SDA GPIO"
+        default 33
+        depends on WRG_OLED_ENABLE
+
+    config WRG_OLED_SCL
+        int "SCL GPIO"
+        default 32
+        depends on WRG_OLED_ENABLE
+
+    config WRG_OLED_ADDRESS
+        hex "I2C address"
+        default 0x3c
+        depends on WRG_OLED_ENABLE
+
+    config WRG_OLED_SH1106
+        bool "SH1106 controller (image shifted on an 'SSD1306' module? try this)"
+        default n
+        depends on WRG_OLED_ENABLE
+
+    config WRG_OLED_HEIGHT
+        int "Height in pixels (64 or 32)"
+        default 64
+        depends on WRG_OLED_ENABLE
+
+    config WRG_OLED_ROTATE
+        bool "Rotate 180 degrees"
+        default n
+        depends on WRG_OLED_ENABLE
+
+    config WRG_OLED_CONTRAST
+        int "Contrast (0-255, low reduces burn-in)"
+        range 0 255
+        default 32
+        depends on WRG_OLED_ENABLE
+
+    config WRG_OLED_SLEEP
+        int "Screen off after this many seconds without a state change (0 = never)"
+        default 300
+        depends on WRG_OLED_ENABLE
+
+endmenu
