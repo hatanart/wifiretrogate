@@ -1,5 +1,9 @@
 # WifiRetroGate
 
+<p align="center">
+  <img src="docs/wifiretrogate.jpg" alt="WifiRetroGate on a WT32-ETH01 board with an OLED display showing the Wi-Fi link status" width="480">
+</p>
+
 A small Wi-Fi adapter for **one vintage Ethernet computer**: plug a DOS PC,
 Windows 3.x machine, Amiga or any other Ethernet-equipped retro machine into it,
 and it joins your Wi-Fi network as if it were on a cable. Old protocols like
