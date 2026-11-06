@@ -55,7 +55,8 @@ To the access point, the retro machine *is* the Wi-Fi client. Details in
   without changes, text moves a pixel every minute.
 - **Console** with the same commands in three places: serial port, **Telnet
   from the retro machine** (`telnet 192.0.2.1`, no settings needed), and raw
-  Ethernet frames (`tools/wrg.py`, no TCP/IP needed on the client).
+  Ethernet frames (`WRG.COM` on DOS with just a packet driver, `tools/wrg.py`
+  on Linux; no TCP/IP needed on the client).
 - About **28 Mbit/s down / 30 Mbit/s up** through the bridge (measured), far
   more than a 10 Mbit retro network card can use.
 - Leaves the Wi-Fi network properly (deauthentication) before every restart;
@@ -93,7 +94,6 @@ Not implemented yet:
 - **BOOTP** for Trumpet Winsock 2.x (most routers do not answer BOOTP; planned:
   translate the BOOTP request into a DHCP lease from the router). Until then,
   give Trumpet a static IP outside the router's DHCP range.
-- The DOS version of the configuration tool (`WRG.COM`).
 - Standalone mode (DHCP for the retro machine when there is no Wi-Fi at all),
   firmware updates over the network, FTP, a carrier PCB.
 
@@ -275,7 +275,8 @@ display. Or use the console (`wifi add`, `wifi forget`, `setup`).
 ```
 
 **Console** - serial (115200 8N1), `telnet 192.0.2.1` from the retro machine
-(`telnet 192.168.4.1` in setup mode), or `sudo python3 tools/wrg.py eth0`:
+(`telnet 192.168.4.1` in setup mode), `WRG` on DOS (see below) or
+`sudo python3 tools/wrg.py eth0`:
 
 ```text
 status              current state          counters        frame counters
@@ -299,6 +300,25 @@ It needs bridge mode and a retro machine with a working IP setup (normally
 from the router's DHCP, so Wi-Fi must be connected). In setup mode the
 Ethernet port is off: use the phone setup page or the serial console for the
 first setup.
+
+## Console on DOS without TCP/IP: WRG.COM
+
+`tools/WRG.COM` (1.8 KB, any PC from the 8088 up) needs nothing but the
+packet driver for the network card. No TCP/IP, no IP address, no settings:
+
+```text
+NE2000 0x60 3 0x300          load your card's packet driver (example)
+WRG                          interactive prompt, "exit" quits
+WRG status                   one command; WRG scan > NETS.TXT also works
+WRG wifi add "My Network" secret123
+```
+
+It finds the packet driver by itself (INT 60h-80h) and talks to WifiRetroGate
+with raw Ethernet frames, so it works even when Wi-Fi is down or the network
+has no DHCP: handy for setting up a new network from the retro machine
+itself. Bridge mode only (the Ethernet port is off in setup mode). Esc stops
+waiting for an answer. ODI-only setups can load ODIPKT to get a packet driver
+next to IPX. Source: `tools/wrg.asm` (`nasm -f bin -o WRG.COM wrg.asm`).
 
 ## Tools (Linux)
 
