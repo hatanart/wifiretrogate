@@ -16,6 +16,7 @@
 #include "console.h"
 #include "eventlog.h"
 #include "settings.h"
+#include "setup.h"
 #include "status.h"
 #include "wifi_sta.h"
 #include "wrg.h"
@@ -112,7 +113,8 @@ static void cmd_help(int argc, char **argv)
 static void cmd_status(int argc, char **argv)
 {
 	if (wrg_setup_mode()) {
-		out("SETUP MODE (access point)\n");
+		out("SETUP MODE (access point)\n"
+		    "add a network with: wifi add NAME PASSWORD, then: reboot\n");
 		return;
 	}
 
@@ -134,6 +136,36 @@ static void cmd_status(int argc, char **argv)
 		    b.client_mac[2], b.client_mac[3], b.client_mac[4], b.client_mac[5]);
 	} else {
 		out("CLIENT  not known yet\n");
+	}
+	uint32_t ips[BRIDGE_MAX_CLIENT_IPS];
+	int ip_count = bridge_get_client_ips(ips, BRIDGE_MAX_CLIENT_IPS);
+	if (ip_count == 0) {
+		out("IP      not seen yet\n");
+	}
+	for (int i = 0; i < ip_count; i++) {
+		const uint8_t *a = (const uint8_t *) &ips[i];
+		out("%s%u.%u.%u.%u%s\n", i == 0 ? "IP      " : "        ", a[0], a[1], a[2], a[3],
+		    i == 0 && ip_count > 1 ? "  (newest)" : "");
+	}
+	if (b.asks_known) {
+		const uint8_t *a = (const uint8_t *) &b.asks_ip;
+		out("ASKS    %u.%u.%u.%u (last ARP request, %lu s ago)\n", a[0], a[1], a[2], a[3],
+		    (unsigned long) b.asks_age_s);
+	}
+	if (b.gateway_stand_in) {
+		if (b.stand_in_count > 0) {
+			const uint8_t *a = (const uint8_t *) &b.stand_in_ip;
+			out("GATEWAY no Wi-Fi since start: answering the client's ARP (%u.%u.%u.%u%s),\n"
+			    "        so telnet %s works; fixed up when Wi-Fi connects\n",
+			    a[0], a[1], a[2], a[3], b.stand_in_count > 1 ? " and others" : "",
+			    CONFIG_WRG_SERVICE_IP);
+		} else {
+			out("GATEWAY no Wi-Fi since start: will answer the client's ARP for its gateway\n");
+		}
+	}
+	if (b.dhcp_no_answer) {
+		out("DHCP    client asks, no answer for %lu s%s\n", (unsigned long) b.dhcp_waiting_s,
+		    w.state == WIFI_STA_CONNECTED ? " (network without DHCP?)" : " (Wi-Fi not connected)");
 	}
 	if (w.state == WIFI_STA_CONNECTED) {
 		out("WIFI    %s, channel %u, %d dBm\n", w.ssid, w.channel, w.rssi);
@@ -311,6 +343,10 @@ static void cmd_version(int argc, char **argv)
 static void cmd_reboot(int argc, char **argv)
 {
 	out("restarting\n");
+	if (wrg_setup_mode()) {
+		/* the setup DHCP lease is no good on the real network */
+		out("then get a new IP address (run DHCP again)\n");
+	}
 	vTaskDelay(pdMS_TO_TICKS(500));
 	wrg_restart(false);	/* bridge mode (back to setup if no networks) */
 }
@@ -345,6 +381,9 @@ static const struct {
 
 void console_exec(const char *line, console_write_t *write, void *ctx)
 {
+	if (wrg_setup_mode()) {
+		setup_activity();
+	}
 	char buffer[200];
 	char *argv[MAX_ARGS];
 

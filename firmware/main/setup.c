@@ -19,9 +19,11 @@
 #include "esp_wifi.h"
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
+#include "bridge.h"
 #include "display.h"
 #include "eventlog.h"
 #include "settings.h"
+#include "telnet.h"
 #include "wifi_sta.h"
 #include "wrg.h"
 #include "setup.h"
@@ -33,6 +35,28 @@ static const char *TAG = "setup";
 static char s_ap_ssid[33];
 static char s_message[64] = "Waiting for phone";
 static volatile bool s_finish;
+
+/* back to bridge mode after this long without anyone using setup mode */
+#define IDLE_TIMEOUT_MS	(10 * 60 * 1000)
+static volatile TickType_t s_activity;
+
+void setup_activity(void)
+{
+	s_activity = xTaskGetTickCount();
+}
+
+/* phone on the access point, Telnet open, or a console command lately */
+static bool idle_too_long(void)
+{
+	wifi_sta_list_t stations;
+	if (esp_wifi_ap_get_sta_list(&stations) == ESP_OK && stations.num > 0) {
+		setup_activity();
+	}
+	if (telnet_sessions() > 0) {
+		setup_activity();
+	}
+	return xTaskGetTickCount() - s_activity > pdMS_TO_TICKS(IDLE_TIMEOUT_MS);
+}
 
 static wifi_ap_record_t s_scan[MAX_SCAN_RESULTS];
 static uint16_t s_scan_count;
@@ -385,14 +409,21 @@ void setup_run(void)
 	eventlog_add("setup access point %s, %s", s_ap_ssid, ap_password[0] ? "WPA2" : "open (no display)");
 	display_setup(s_ap_ssid, ap_password, "Scanning...");
 	scan_networks();
+	bridge_start_setup();	/* WRG and Telnet from the retro machine too */
 
 	start_web_server();
 	xTaskCreate(dns_task, "dns", 3072, NULL, 4, NULL);
 
 	strlcpy(s_message, settings_network_count() ? "Add or finish" : "Add a network", sizeof s_message);
+	setup_activity();
 	while (!s_finish) {
 		display_setup(s_ap_ssid, ap_password, s_message);
 		vTaskDelay(pdMS_TO_TICKS(1000));
+		if (settings_network_count() > 0 && idle_too_long()) {
+			ESP_LOGI(TAG, "10 minutes without activity, back to bridge mode");
+			eventlog_add("setup idle 10 min, back to bridge mode");
+			wrg_restart(false);
+		}
 	}
 
 	vTaskDelay(pdMS_TO_TICKS(1000));	/* let the last page reach the phone */

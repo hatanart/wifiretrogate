@@ -19,7 +19,12 @@ static const char *TAG = "telnet";
 #define IAC		255
 #define SB		250
 #define SE		240
-#define WILL		251	/* WILL, WONT, DO, DONT: 251..254 */
+#define WILL		251
+#define WONT		252
+#define DO		253
+#define DONT		254
+#define OPT_ECHO	1
+#define OPT_SGA		3	/* suppress go-ahead: character at a time */
 
 static volatile int s_sessions;
 
@@ -49,8 +54,15 @@ static void session_task(void *arg)
 	char line[INPUT_MAX];
 	size_t len = 0;
 	enum { DATA, COMMAND, OPTION, SUBNEG, SUBNEG_IAC } state = DATA;
+	uint8_t verb = 0;
 	bool last_cr = false;
 	uint8_t buffer[64];
+
+	/* we echo, so clients that do not echo locally (mTCP, small 8-bit
+	 * stacks) show what is typed; a client that says DONT ECHO echoes itself */
+	bool echo = true;
+	static const uint8_t offer[] = { IAC, WILL, OPT_ECHO, IAC, WILL, OPT_SGA };
+	send(sock, offer, sizeof offer, 0);
 
 	telnet_write(&sock, "WifiRetroGate console, type help (quit to leave)\nwrg> ");
 
@@ -66,12 +78,23 @@ static void session_task(void *arg)
 			switch (state) {
 			case COMMAND:
 				state = c == SB ? SUBNEG : c == IAC ? DATA : c >= WILL ? OPTION : DATA;
+				verb = c;
 				if (c != IAC) {
 					continue;
 				}
 				break;		/* IAC IAC: a literal 255 */
 			case OPTION:
 				state = DATA;
+				if (c == OPT_ECHO && (verb == DO || verb == DONT)) {
+					echo = verb == DO;
+				} else if (verb == DO && c != OPT_SGA) {
+					/* we do no other options */
+					uint8_t no[] = { IAC, WONT, c };
+					send(sock, no, sizeof no, 0);
+				} else if (verb == WILL && c != OPT_SGA) {
+					uint8_t no[] = { IAC, DONT, c };
+					send(sock, no, sizeof no, 0);
+				}
 				continue;
 			case SUBNEG:
 				if (c == IAC) {
@@ -90,6 +113,9 @@ static void session_task(void *arg)
 			}
 
 			if (c == '\r' || (c == '\n' && !last_cr)) {
+				if (echo) {
+					send(sock, "\r\n", 2, 0);
+				}
 				line[len] = '\0';
 				len = 0;
 				if (strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0) {
@@ -100,9 +126,15 @@ static void session_task(void *arg)
 			} else if (c == 0x08 || c == 0x7f) {
 				if (len > 0) {
 					len--;
+					if (echo) {
+						send(sock, "\b \b", 3, 0);
+					}
 				}
 			} else if (c >= 0x20 && c != IAC && len < INPUT_MAX - 1) {
 				line[len++] = c;
+				if (echo) {
+					send(sock, &c, 1, 0);
+				}
 			}
 			last_cr = c == '\r';
 		}
@@ -143,9 +175,16 @@ static void listen_task(void *arg)
 		}
 		/* notice dead clients (cable pulled, machine switched off) */
 		setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof yes);
+		/* echo goes out a byte at a time: do not hold it back */
+		setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof yes);
 		s_sessions++;
 		xTaskCreate(session_task, "telnet", 4096, (void *) sock, 3, NULL);
 	}
+}
+
+int telnet_sessions(void)
+{
+	return s_sessions;
 }
 
 void telnet_start(void)

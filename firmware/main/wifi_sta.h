@@ -30,8 +30,14 @@ typedef struct {
 /* Fast check for the forwarding path */
 extern volatile bool wifi_sta_up;
 
-/* Start the station with the given MAC; frames received while connected go to rx. */
-void wifi_sta_start(const uint8_t mac[6], wifi_rxcb_t rx);
+/* Start the station with the given MAC; frames received while connected go to
+ * rx. connected (may be NULL) is called from the Wi-Fi task after every
+ * successful connection. */
+void wifi_sta_start(const uint8_t mac[6], wifi_rxcb_t rx, void (*connected)(void));
+
+/* True when every saved network has been tried at least once since start-up
+ * and none could be reached (false again forever after the first connection) */
+bool wifi_sta_unreachable_since_boot(void);
 
 void wifi_sta_get_status(wifi_sta_status_t *status);
 

@@ -23,6 +23,14 @@ static const char *TAG = "wifi";
 #define RESCAN_DELAY_MS		5000
 
 volatile bool wifi_sta_up;
+static void (*s_connected_cb)(void);
+static volatile bool s_ever_connected;
+static volatile bool s_round_done;	/* all saved networks tried at least once */
+
+bool wifi_sta_unreachable_since_boot(void)
+{
+	return s_round_done && !s_ever_connected;
+}
 
 static EventGroupHandle_t s_events;
 static wifi_rxcb_t s_rx;
@@ -175,6 +183,7 @@ static void wifi_task(void *arg)
 		int count = find_candidates(candidates);
 		if (count == 0) {
 			set_state(WIFI_STA_NOT_FOUND, "");
+			s_round_done = true;
 			vTaskDelay(pdMS_TO_TICKS(RESCAN_DELAY_MS));
 			continue;
 		}
@@ -187,6 +196,10 @@ static void wifi_task(void *arg)
 			ESP_LOGI(TAG, "connected to \"%s\"", candidates[i]->ssid);
 			eventlog_add("Wi-Fi connected: %.24s", candidates[i]->ssid);
 			set_state(WIFI_STA_CONNECTED, candidates[i]->ssid);
+			s_ever_connected = true;
+			if (s_connected_cb != NULL) {
+				s_connected_cb();
+			}
 
 			/* stay here until the connection drops, then search again */
 			xEventGroupWaitBits(s_events, DISCONNECTED_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
@@ -197,14 +210,16 @@ static void wifi_task(void *arg)
 		}
 
 		/* failed attempts already got a "FAILED" state; give the display a moment */
+		s_round_done = true;
 		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
 }
 
-void wifi_sta_start(const uint8_t mac[6], wifi_rxcb_t rx)
+void wifi_sta_start(const uint8_t mac[6], wifi_rxcb_t rx, void (*connected)(void))
 {
 	s_events = xEventGroupCreate();
 	s_rx = rx;
+	s_connected_cb = connected;
 
 	wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&init));

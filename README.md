@@ -34,34 +34,50 @@ that machine's MAC address** on the Wi-Fi side and forwards frames unchanged.
 To the access point, the retro machine *is* the Wi-Fi client. Details in
 [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md).
 
+## How this differs from other Ethernet-to-Wi-Fi bridges
+
+Most ESP32 bridges for this board route or NAT: the wired device gets a
+private address behind the ESP32. That is fine for getting a modern device
+online, but the retro machine is then hidden from the network and anything
+that is not plain outgoing TCP/IP breaks: IPX games, NetBIOS, being pinged
+or hosting a server.
+
+WifiRetroGate is a bridge for exactly one machine and takes over its MAC
+address, so the machine is a normal member of the network:
+
+- **IPX works**, in all four frame types. The ESP32 Wi-Fi hardware mangles
+  some of them (lost 802.3 length fields, no real 802.1H support); the
+  firmware works around each one, measured over the air, and tested with Doom.
+- **Built to stay connected**: up to 8 saved networks, strongest first,
+  retries forever, leaves Wi-Fi cleanly before every restart. An open Telnet
+  session survives even a firmware update.
+- **Set up from the retro machine itself**: `WRG.COM` with only a packet
+  driver, or DHCP and `telnet 192.0.2.1`. No phone or laptop needed.
+- **Tells you what is wrong**: the display shows why it does not work, the
+  machine's IP address, whom it is looking for and whether its DHCP gets an
+  answer.
+
+If you need several wired machines behind one ESP32, a NAT or routing
+project is the better fit.
+
 ## What it does
 
-- Transparent Ethernet <-> Wi-Fi bridge for one machine: DHCP, ARP, TCP/IP,
-  IPv6, multicast and IPX all pass through. No settings on the retro machine.
-- **IPX** in all four Ethernet encapsulations: 802.2 (the Novell ODI default),
-  raw 802.3 (old `IPX.COM`), SNAP, and Ethernet II (with a limitation, see
-  below). Tested with **Doom** between a DOS PC behind WifiRetroGate and a wired
-  DOS PC.
-- Learns the retro machine's MAC by itself and remembers it. A different
-  machine is accepted after the cable is unplugged and plugged in again.
-- **WPA2 and WPA3**, open networks, up to **8 saved networks**; connects to the
-  strongest one in range, retries forever, reconnects after router restarts.
-- **Setup mode**: an access point with a one-page web form for phones (opens by
-  itself, like hotel Wi-Fi login pages). Entered automatically when no network
-  is saved, or with a long press on the button.
-- **Status display** (optional 128x64 or 128x32 I2C OLED): the first line says
-  whether it works and, if not, why (`WIFI: wrong password`, `ETH: no cable`,
-  `hotspot? use 2.4 GHz`, ...). Burn-in protection: screen off after a while
-  without changes, text moves a pixel every minute.
-- **Console** with the same commands in three places: serial port, **Telnet
-  from the retro machine** (`telnet 192.0.2.1`, no settings needed), and raw
-  Ethernet frames (`WRG.COM` on DOS with just a packet driver, `tools/wrg.py`
-  on Linux; no TCP/IP needed on the client).
-- About **28 Mbit/s down / 30 Mbit/s up** through the bridge (measured), far
-  more than a 10 Mbit retro network card can use.
-- Leaves the Wi-Fi network properly (deauthentication) before every restart;
-  CPU clock drops to 80 MHz when idle without any Wi-Fi power saving, so no
-  frames are delayed or lost.
+- Transparent bridge for one machine: DHCP, ARP, TCP/IP, IPv6, multicast and
+  IPX pass through. No settings on the retro machine; it learns the machine's
+  MAC by itself (a new machine: unplug and replug the cable).
+- **IPX** in all four frame types: 802.2 (ODI default), raw 802.3 (old
+  `IPX.COM`), SNAP, and Ethernet II (with a limit, see below).
+- **WPA2 / WPA3** and open networks, up to **8 saved**, strongest first.
+- **Setup mode**: a web form for phones (opens by itself), or from the retro
+  machine. Starts when no network is saved or on a long button press, and goes
+  back to bridge mode after 10 minutes without use.
+- **Display** (optional 128x64 OLED): status and the reason when something
+  fails, the machine's IP, hints. Turns off when nothing changes, and moves the
+  text a pixel every minute against burn-in.
+- **Console** over serial, Telnet (`192.0.2.1`) or raw frames (`WRG.COM` on DOS,
+  `tools/wrg.py` on Linux).
+- **28 Mbit/s down / 30 up** measured, far more than a 10 Mbit card can use.
+  CPU drops to 80 MHz when idle, with no Wi-Fi power saving, so no lost frames.
 
 ## What it cannot do (yet)
 
@@ -94,8 +110,7 @@ Not implemented yet:
 - **BOOTP** for Trumpet Winsock 2.x (most routers do not answer BOOTP; planned:
   translate the BOOTP request into a DHCP lease from the router). Until then,
   give Trumpet a static IP outside the router's DHCP range.
-- Standalone mode (DHCP for the retro machine when there is no Wi-Fi at all),
-  firmware updates over the network, FTP, a carrier PCB.
+- Firmware updates over the network, FTP, a carrier PCB.
 
 Other things to know:
 
@@ -103,8 +118,8 @@ Other things to know:
   and is lost while Wi-Fi connects; protocols retry, so you rarely notice.
   After that the MAC is saved and Wi-Fi connects at power-on.
 - The console has no password. It is only reachable from the retro machine
-  (Telnet on the service address), the serial port, and the setup access point
-  (WPA2, its password is shown on the display).
+  (Telnet on the service address, `WRG.COM`), the serial port, and the setup
+  access point (WPA2, its password is shown on the display).
 - **Without a display the setup access point is open** (nobody could read a
   password). While setup mode is on, anyone nearby could join it and add a
   network. It cannot show saved passwords. Finish the setup and it is gone.
@@ -232,8 +247,8 @@ To start from scratch (forget networks and the client MAC):
    Join Wi-Fi:
    WifiRetroGate-3F2A
    PASS 7k2m9qx4
-
    http://192.168.4.1
+   or telnet 192.0.2.1
    ```
 
    **No display?** Then the access point `WifiRetroGate-XXXX` is **open**, no
@@ -243,13 +258,20 @@ To start from scratch (forget networks and the client MAC):
    browse to `http://192.168.4.1`). Pick your network, enter the password,
    **Save**, then **Finish and connect**.
 
-   Without a phone: on the serial console (115200 baud) type
-   `wifi add NAME PASSWORD`, then `reboot`.
+   **Without a phone**, from the retro machine on the Ethernet cable: get an
+   address by DHCP (setup mode has a small DHCP server, `192.0.2.x`), then
+   `telnet 192.0.2.1`. Or, on DOS without TCP/IP, use `WRG` (see below). Or use
+   the serial console (115200 baud). Type `wifi add NAME PASSWORD`, then
+   `reboot`, and get a new address afterwards (run DHCP again): the setup
+   lease is only for setup mode.
 3. Connect the retro machine with an Ethernet cable and switch it on. When it
    sends its first frame, WifiRetroGate learns its MAC and connects.
 
 Later: long press (2 s) on the button for setup mode, short press to wake the
-display. Or use the console (`wifi add`, `wifi forget`, `setup`).
+display. Or use the console (`wifi add`, `wifi forget`, `setup`). Setup mode
+goes back to bridge mode by itself after 10 minutes without use (no phone on
+the access point, no Telnet session, no console command), unless no network is
+saved.
 
 ## Using it
 
@@ -264,18 +286,37 @@ display. Or use the console (`wifi add`, `wifi forget`, `setup`).
 ```text
 +---------------------+
 |OK HomeNet     -48dBm|   <- works? and if not, why:
-|                     |      WIFI: wrong password / no known net /
+|IP   192.168.1.20    |      WIFI: wrong password / no known net /
 |ETH  LINK 10M half   |      connecting...   ETH: no cable
 |MAC  004063123456    |      WAITING FOR CLIENT
 |WIFI HomeNet         |
-|                     |   <- hints: hotspot? use 2.4 GHz / IPX: use 802.2 frame
-|TX 18294   RX 17622  |
-|DROP 3      ERR 0    |
+|ASKS 192.168.1.1     |   <- hints, taking turns every 3 s when several apply:
+|TX 18294   RX 17622  |      hotspot? use 2.4 GHz / IPX: use 802.2 frame /
+|DROP 3      ERR 0    |      telnet 192.0.2.1 ok / DHCP: no answer / ASKS ...
 +---------------------+
 ```
 
+The IP address is the one the retro machine uses, learned from its own ARP
+packets: `IP   -` until it has used IP, `+1` when it used another address in
+the last 10 minutes (`status` lists them all). `ASKS` is the last address it
+looked for with ARP, normally its gateway: with an unknown device it tells
+which network the device expects. `DHCP: no answer` means it keeps asking for
+an address and nothing answers (no DHCP on that network, or no Wi-Fi). Handy
+for finding the address of any Ethernet device: plug it in and power it up.
+
+**No Wi-Fi at all since power-on** (every saved network tried, none reached):
+WifiRetroGate answers the machine's ARP requests for its gateway itself, so a
+machine that has an address (static, or one left from earlier) can still
+`telnet 192.0.2.1` and add a network (`telnet 192.0.2.1 ok` on the display).
+It hands out no addresses, and once Wi-Fi has connected it never does this
+again until the next restart. When Wi-Fi connects, it asks the real router for
+the same addresses on the machine's behalf, so the machine's ARP cache points
+at the real gateway again. A machine without an address: use `WRG`, or the
+button for setup mode.
+
 **Console** - serial (115200 8N1), `telnet 192.0.2.1` from the retro machine
-(`telnet 192.168.4.1` in setup mode), `WRG` on DOS (see below) or
+(also in setup mode; from a phone on the setup access point
+`telnet 192.168.4.1`), `WRG` on DOS (see below) or
 `sudo python3 tools/wrg.py eth0`:
 
 ```text
@@ -296,10 +337,11 @@ Quote network names with spaces: `wifi add "My Network" secret123`.
 sends it to its gateway, and WifiRetroGate picks those packets up before they
 leave. No settings, and the rest of your LAN cannot reach the console.
 
-It needs bridge mode and a retro machine with a working IP setup (normally
-from the router's DHCP, so Wi-Fi must be connected). In setup mode the
-Ethernet port is off: use the phone setup page or the serial console for the
-first setup.
+In bridge mode it needs a retro machine with a working IP setup (normally from
+the router's DHCP, so Wi-Fi must be connected). In setup mode WifiRetroGate
+gives the retro machine an address itself (DHCP, `192.0.2.x`)
+and `192.0.2.1` is its own address on the cable, so the same command works for
+the first setup.
 
 ## Console on DOS without TCP/IP: WRG.COM
 
@@ -316,7 +358,7 @@ WRG wifi add "My Network" secret123
 It finds the packet driver by itself (INT 60h-80h) and talks to WifiRetroGate
 with raw Ethernet frames, so it works even when Wi-Fi is down or the network
 has no DHCP: handy for setting up a new network from the retro machine
-itself. Bridge mode only (the Ethernet port is off in setup mode). Esc stops
+itself. Works in bridge and setup mode. Esc stops
 waiting for an answer. ODI-only setups can load ODIPKT to get a packet driver
 next to IPX. Source: `tools/wrg.asm` (`nasm -f bin -o WRG.COM wrg.asm`).
 

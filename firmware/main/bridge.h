@@ -26,11 +26,23 @@ typedef struct {
 	uint32_t fix_tx_8021h, fix_rx_8021h;	/* IPX/AARP Ethernet II frames given the 802.1H header in software */
 	uint32_t fix_rx_length;		/* 802.3 length fields repaired (ESP32 delivers 0) */
 	bool ipx_ethernet_ii;		/* client sent Ethernet II IPX within the last minute */
+	bool asks_known;		/* client sent an ARP request within the last 10 minutes */
+	uint32_t asks_ip;		/* ...for this address (network byte order) */
+	uint32_t asks_age_s;
+	bool dhcp_no_answer;		/* client asks for DHCP, no reply for 8 s or more */
+	uint32_t dhcp_waiting_s;
+	bool gateway_stand_in;		/* no Wi-Fi since start: we answer the client's ARP */
+	int stand_in_count;		/* addresses answered for (gateway, ...) */
+	uint32_t stand_in_ip;		/* the last one (network byte order) */
 	uint8_t last_other_mac[6];
 } bridge_status_t;
 
 /* Start Ethernet, learn the client MAC (blocks until known), then start Wi-Fi. */
 void bridge_start(void);
+
+/* Setup mode: nothing is bridged. Ethernet answers the raw-frame config tool
+ * and has the service address with a DHCP server, for Telnet. */
+void bridge_start_setup(void);
 
 void bridge_get_status(bridge_status_t *status);
 
@@ -41,6 +53,13 @@ typedef struct {
 	uint32_t frames;
 } bridge_other_mac_t;
 int bridge_get_other_macs(bridge_other_mac_t *macs, int max);
+
+/* The client's IPv4 addresses (network byte order), newest first: the newest
+ * always, others if seen within the last 10 minutes. Learned from the
+ * sender address of its ARP packets, or from the source address of its IPv4
+ * packets until the first ARP. Returns the count (0 = none seen yet). */
+#define BRIDGE_MAX_CLIENT_IPS	4
+int bridge_get_client_ips(uint32_t *ips, int max);
 
 /* Send a frame of our own on the Ethernet side (config protocol replies) */
 esp_err_t bridge_eth_send(const void *frame, size_t len);

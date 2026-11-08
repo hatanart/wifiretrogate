@@ -53,11 +53,6 @@ menu "WifiRetroGate display"
         default n
         depends on WRG_OLED_ENABLE
 
-    config WRG_OLED_HEIGHT
-        int "Height in pixels (64 or 32)"
-        default 64
-        depends on WRG_OLED_ENABLE
-
     config WRG_OLED_ROTATE
         bool "Rotate 180 degrees"
         default n

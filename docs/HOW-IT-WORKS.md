@@ -166,6 +166,21 @@ keeps the password-less console private to the retro machine. The Telnet server
 runs in line mode (the client echoes and sends whole lines), which suits DOS
 Telnet clients.
 
+### Gateway stand-in when no Wi-Fi was ever reached
+
+The service address needs the client to reach its gateway, so with Wi-Fi down
+it would be unreachable. When every saved network has been tried since
+start-up and none was reached, WifiRetroGate answers the client's ARP requests
+(not probes or announcements) with its own Ethernet MAC. The client then sends
+its packets for `192.0.2.1` to that MAC, and they are picked out by
+destination IP as usual. Up to 4 answered addresses are remembered. When Wi-Fi
+connects, WifiRetroGate sends ARP requests for them on Wi-Fi with the client's
+MAC and IP (twice, a second apart); the real replies reach the client and
+replace the stand-in MAC in its ARP cache. After the first Wi-Fi connection
+the stand-in is off until the next restart: a router restart or a short
+dropout is not covered, since the real gateway comes back. No addresses are
+ever handed out in bridge mode.
+
 ## Setup mode
 
 The ESP32 runs an access point (`WifiRetroGate-XXXX`, WPA2, a random
@@ -179,8 +194,24 @@ open instead.
   finish. Hidden networks can be typed in by name (but see the known gap
   under Wi-Fi management).
 
-Forwarding is off in setup mode. Switching between setup and bridge mode is
-done with a restart.
+Forwarding is off in setup mode, but the Ethernet port stays on so the retro
+machine can do the setup itself:
+- raw config frames (EtherType 0x88B5) go to the console as in bridge mode, so
+  `WRG.COM` and `wrg.py` work;
+- everything else goes to an lwIP interface of its own with the service
+  address `192.0.2.1/24` and a DHCP server (`192.0.2.x`, 2-hour leases,
+  gateway `192.0.2.1`). `telnet 192.0.2.1` therefore works the same as in
+  bridge mode. This interface exists only in setup mode, when nothing is
+  bridged, so it never competes with a real DHCP server. The lease is 2 hours
+  because mTCP refuses to start with less than an hour left. After setup the
+  machine needs a new address: run DHCP again (the `reboot` message says so);
+  clients that renew by themselves get a NAK from the real router at the
+  latest when the lease runs out.
+
+Switching between setup and bridge mode is done with a restart. Setup mode
+goes back to bridge mode after 10 minutes without use (no station on the
+access point, no Telnet session, no console command) when at least one
+network is saved; with none saved it would only come straight back.
 
 ## Wi-Fi management
 
@@ -206,9 +237,9 @@ matters more for games than the last Mbit/s.
 | File | Purpose |
 |---|---|
 | `main.c` | boot: settings, display, button, console, mode choice, restart helper |
-| `bridge.c` | Ethernet (LAN8720), client learning, forwarding, ESP32 workarounds |
+| `bridge.c` | Ethernet (LAN8720), client MAC and IP learning, forwarding, ESP32 workarounds, Ethernet in setup mode |
 | `wifi_sta.c` | station manager: scan, choose, connect, reconnect, status |
-| `setup.c` | setup access point, web page, captive-portal DNS |
+| `setup.c` | setup access point, web page, captive-portal DNS, idle timeout |
 | `svcnet.c` | service address: lwIP interface fed by the bridge |
 | `telnet.c` | Telnet server (line mode) |
 | `console.c` | command interpreter shared by serial, Telnet and raw frames |

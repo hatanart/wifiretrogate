@@ -17,6 +17,8 @@
 #include "esp_private/wifi.h"
 #include "esp_eth.h"
 #include "esp_eth_mac_esp.h"
+#include "esp_eth_netif_glue.h"
+#include "esp_netif.h"
 #include "driver/gpio.h"
 #include "bridge.h"
 #include "eventlog.h"
@@ -47,8 +49,252 @@ static esp_eth_handle_t s_eth;
 static volatile bridge_status_t s_status;
 static volatile bool s_relearn = true;	/* new link (or boot): check for a new client */
 static volatile TickType_t s_last_ipx_ethernet_ii;	/* 0 = never */
+
+/* what the client looks for (its gateway, a server): tells which network it
+ * expects, even when its own address is unclear */
+static volatile uint32_t s_asks_ip;
+static volatile TickType_t s_asks_seen;			/* 0 = never */
+
+/*
+ * Gateway stand-in: when no saved network could be reached since start-up,
+ * answer the client's ARP requests with our own MAC, so a machine that has an
+ * address (static, or an old lease) can still reach Telnet on the service
+ * address. Never after the first Wi-Fi connection, so a router restart is not
+ * covered (the real gateway comes back). When Wi-Fi does connect, we ask for
+ * the same addresses on Wi-Fi as the client: the real replies go to the client
+ * and replace our MAC in its ARP cache.
+ */
+#define STAND_IN_MAX	4
+static struct {
+	uint32_t target;	/* address the client asked for */
+	uint32_t sender;	/* the client's own address in that request */
+} s_stand_in[STAND_IN_MAX];
+static volatile int s_stand_in_count;
+
+/* DHCP from the client that nobody answers (Ethernet task writes the request
+ * times, Wi-Fi task clears them on a reply) */
+static volatile TickType_t s_dhcp_waiting_since;	/* 0 = not waiting */
+static volatile TickType_t s_dhcp_last_request;
 static bridge_other_mac_t s_other_macs[BRIDGE_MAX_OTHER_MACS];
 static int s_other_mac_count;
+
+/* client IPv4 addresses, see bridge_get_client_ips() */
+#define CLIENT_IP_RECENT_MS	(10 * 60 * 1000)
+static uint32_t s_client_ips[BRIDGE_MAX_CLIENT_IPS];
+static TickType_t s_client_ip_seen[BRIDGE_MAX_CLIENT_IPS];
+static int s_client_ip_count;
+static bool s_client_ip_from_arp;
+
+static void note_client_ip(uint32_t ip, bool from_arp)
+{
+	if (ip == 0 || ip == 0xffffffff) {
+		return;		/* 0.0.0.0: ARP probe or DHCP before it has an address */
+	}
+	if (from_arp && !s_client_ip_from_arp) {
+		/* ARP names only the machine's own addresses; IPv4 sources could
+		 * be machines it routes for: forget those */
+		s_client_ip_from_arp = true;
+		s_client_ip_count = 0;
+	} else if (!from_arp && s_client_ip_from_arp) {
+		return;
+	}
+
+	TickType_t now = xTaskGetTickCount();
+	int slot = 0;
+	for (int i = 0; i < s_client_ip_count; i++) {
+		if (s_client_ips[i] == ip) {
+			s_client_ip_seen[i] = now;
+			return;
+		}
+		if (now - s_client_ip_seen[i] > now - s_client_ip_seen[slot]) {
+			slot = i;
+		}
+	}
+	if (s_client_ip_count < BRIDGE_MAX_CLIENT_IPS) {
+		slot = s_client_ip_count++;
+	}
+	s_client_ips[slot] = ip;
+	s_client_ip_seen[slot] = now;
+}
+
+/* UDP ports of an IPv4 frame, false if it is not UDP; *payload: UDP data offset */
+static bool udp_ports(const uint8_t *frame, uint32_t len, int *src_port, int *dst_port,
+		      uint32_t *payload)
+{
+	if (len < 34 || frame[12] != 0x08 || frame[13] != 0x00 || (frame[14] >> 4) != 4
+	    || frame[23] != 17) {
+		return false;
+	}
+	uint32_t udp = 14 + (frame[14] & 0x0f) * 4;
+	if (len < udp + 8) {
+		return false;
+	}
+	*src_port = frame[udp] << 8 | frame[udp + 1];
+	*dst_port = frame[udp + 2] << 8 | frame[udp + 3];
+	*payload = udp + 8;
+	return true;
+}
+
+/* frames from the client: DHCP requests */
+static void watch_dhcp_request(const uint8_t *frame, uint32_t len)
+{
+	int src_port, dst_port;
+	uint32_t payload;
+	if (udp_ports(frame, len, &src_port, &dst_port, &payload) && src_port == 68 && dst_port == 67) {
+		TickType_t now = xTaskGetTickCount() | 1;
+		if (s_dhcp_waiting_since == 0) {
+			s_dhcp_waiting_since = now;
+		}
+		s_dhcp_last_request = now;
+	}
+}
+
+/* frames from Wi-Fi: a DHCP reply for the client ends the wait (other
+ * machines' replies can be broadcast too: check the client hardware address) */
+static void watch_dhcp_reply(const uint8_t *frame, uint32_t len)
+{
+	int src_port, dst_port;
+	uint32_t payload;
+	if (s_dhcp_waiting_since != 0 && udp_ports(frame, len, &src_port, &dst_port, &payload)
+	    && src_port == 67 && dst_port == 68 && len >= payload + 28 + 6
+	    && memcmp(frame + payload + 28, (const uint8_t *) s_status.client_mac, 6) == 0) {
+		s_dhcp_waiting_since = 0;
+	}
+}
+
+static void learn_client_ip(const uint8_t *frame, uint32_t len)
+{
+	uint32_t ip;
+
+	if (frame[12] == 0x08 && frame[13] == 0x06 && len >= 42
+	    && frame[14] == 0x00 && frame[15] == 0x01		/* Ethernet */
+	    && frame[16] == 0x08 && frame[17] == 0x00		/* IPv4 */
+	    && frame[18] == 6 && frame[19] == 4) {
+		memcpy(&ip, frame + 28, 4);			/* sender IP */
+		note_client_ip(ip, true);
+
+		uint32_t target;
+		memcpy(&target, frame + 38, 4);			/* target IP */
+		if (frame[20] == 0x00 && frame[21] == 0x01	/* request */
+		    && ip != 0					/* not a probe for its own address */
+		    && target != ip && target != 0) {		/* not an announcement */
+			s_asks_ip = target;
+			s_asks_seen = xTaskGetTickCount() | 1;
+		}
+	} else if (frame[12] == 0x08 && frame[13] == 0x00 && len >= 34
+		   && (frame[14] >> 4) == 4 && !s_client_ip_from_arp) {
+		memcpy(&ip, frame + 26, 4);			/* source IP */
+		note_client_ip(ip, false);
+	}
+}
+
+/* Ethernet task: an ARP request from the client while Wi-Fi was never up.
+ * True if answered (consumed). */
+static bool stand_in_arp(const uint8_t *frame, uint32_t len)
+{
+	if (wifi_sta_up || !wifi_sta_unreachable_since_boot()
+	    || len < 42 || frame[12] != 0x08 || frame[13] != 0x06
+	    || frame[14] != 0x00 || frame[15] != 0x01 || frame[16] != 0x08 || frame[17] != 0x00
+	    || frame[18] != 6 || frame[19] != 4 || frame[20] != 0x00 || frame[21] != 0x01) {
+		return false;
+	}
+	uint32_t sender, target;
+	memcpy(&sender, frame + 28, 4);
+	memcpy(&target, frame + 38, 4);
+	if (sender == 0 || target == 0 || target == sender) {
+		return false;		/* probe or announcement: not a question for us */
+	}
+
+	int count = s_stand_in_count;
+	bool known = false;
+	for (int i = 0; i < count; i++) {
+		known |= s_stand_in[i].target == target;
+	}
+	if (!known && count < STAND_IN_MAX) {
+		s_stand_in[count].target = target;
+		s_stand_in[count].sender = sender;
+		s_stand_in_count = count + 1;
+		const uint8_t *t = (const uint8_t *) &target;
+		eventlog_add("no Wi-Fi: answering ARP for %u.%u.%u.%u", t[0], t[1], t[2], t[3]);
+	}
+
+	uint8_t own[6];
+	bridge_eth_mac(own);
+	uint8_t reply[60] = { 0 };
+	memcpy(reply, frame + 6, 6);			/* to the client */
+	memcpy(reply + 6, own, 6);
+	reply[12] = 0x08;
+	reply[13] = 0x06;
+	memcpy(reply + 14, frame + 14, 6);		/* Ethernet, IPv4, 6, 4 */
+	reply[20] = 0x00;
+	reply[21] = 0x02;				/* reply */
+	memcpy(reply + 22, own, 6);			/* sender: us... */
+	memcpy(reply + 28, &target, 4);			/* ...as the address it asked for */
+	memcpy(reply + 32, frame + 6, 6);		/* target: the client */
+	memcpy(reply + 38, &sender, 4);
+	bridge_eth_send(reply, sizeof reply);
+	return true;
+}
+
+/* Wi-Fi task, after a connection: ask for the stood-in addresses as the
+ * client, so the real replies correct its ARP cache */
+static void wifi_connected(void)
+{
+	int count = s_stand_in_count;
+	if (count == 0) {
+		return;
+	}
+	for (int round = 0; round < 2; round++) {
+		if (round > 0) {
+			vTaskDelay(pdMS_TO_TICKS(1000));	/* in case the first went out too early */
+		}
+		for (int i = 0; i < count; i++) {
+			uint8_t request[42] = { 0 };
+			memset(request, 0xff, 6);
+			memcpy(request + 6, (const uint8_t *) s_status.client_mac, 6);
+			request[12] = 0x08;
+			request[13] = 0x06;
+			request[15] = 0x01;
+			request[16] = 0x08;
+			request[18] = 6;
+			request[19] = 4;
+			request[21] = 0x01;
+			memcpy(request + 22, (const uint8_t *) s_status.client_mac, 6);
+			memcpy(request + 28, &s_stand_in[i].sender, 4);
+			memcpy(request + 38, &s_stand_in[i].target, 4);
+			esp_wifi_internal_tx(WIFI_IF_STA, request, sizeof request);
+		}
+	}
+	eventlog_add("Wi-Fi up: asked again for %d address(es) for the client", count);
+}
+
+int bridge_get_client_ips(uint32_t *ips, int max)
+{
+	/* a copy first: the Ethernet task may change the table meanwhile */
+	uint32_t ip[BRIDGE_MAX_CLIENT_IPS];
+	TickType_t seen[BRIDGE_MAX_CLIENT_IPS];
+	int count = s_client_ip_count;
+	memcpy(ip, s_client_ips, sizeof ip);
+	memcpy(seen, s_client_ip_seen, sizeof seen);
+
+	TickType_t now = xTaskGetTickCount();
+	int n = 0;
+	bool used[BRIDGE_MAX_CLIENT_IPS] = { false };
+	while (n < max) {
+		int newest = -1;
+		for (int i = 0; i < count; i++) {
+			if (!used[i] && (newest < 0 || now - seen[i] < now - seen[newest])) {
+				newest = i;
+			}
+		}
+		if (newest < 0 || (n > 0 && now - seen[newest] > pdMS_TO_TICKS(CLIENT_IP_RECENT_MS))) {
+			break;
+		}
+		used[newest] = true;
+		ips[n++] = ip[newest];
+	}
+	return n;
+}
 
 static void note_other_mac(const uint8_t *mac)
 {
@@ -183,7 +429,11 @@ static esp_err_t eth_rx(esp_eth_handle_t eth, uint8_t *frame, uint32_t len, void
 		}
 	} else if (memcmp(src, (const uint8_t *) s_status.client_mac, 6) == 0) {
 		s_relearn = false;
-		if (svcnet_input(frame, len)) {
+		learn_client_ip(frame, len);
+		watch_dhcp_request(frame, len);
+		if (stand_in_arp(frame, len)) {
+			/* no Wi-Fi since start: we stood in for its gateway */
+		} else if (svcnet_input(frame, len)) {
 			/* for our own services (Telnet on the service address) */
 		} else if (wifi_sta_up) {
 			if (esp_wifi_internal_tx(WIFI_IF_STA, frame, len) == ESP_OK) {
@@ -240,6 +490,7 @@ static esp_err_t wifi_rx(void *buffer, uint16_t buffer_len, void *eb)
 		s_status.fix_rx_8021h++;
 	}
 	repair_length_field(frame, len);
+	watch_dhcp_reply(frame, len);
 	const uint8_t *src = frame + 6;
 
 	if (memcmp(src, (const uint8_t *) s_status.client_mac, 6) == 0) {
@@ -312,12 +563,15 @@ static void ethernet_init(void)
 
 	esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
 	ESP_ERROR_CHECK(esp_eth_driver_install(&config, &s_eth));
-	ESP_ERROR_CHECK(esp_eth_update_input_path(s_eth, eth_rx, NULL));
-
-	bool promiscuous = true;
-	ESP_ERROR_CHECK(esp_eth_ioctl(s_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous));
-
 	ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, eth_event, NULL));
+}
+
+/* bridge mode: every frame, whatever its destination MAC */
+static void ethernet_start_bridge(void)
+{
+	bool promiscuous = true;
+	ESP_ERROR_CHECK(esp_eth_update_input_path(s_eth, eth_rx, NULL));
+	ESP_ERROR_CHECK(esp_eth_ioctl(s_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous));
 	ESP_ERROR_CHECK(esp_eth_start(s_eth));
 }
 
@@ -331,9 +585,11 @@ void bridge_start(void)
 		s_status.client_known = true;
 		ESP_LOGI(TAG, "saved client " MACSTR_FMT, MAC2ARGS(mac));
 		ethernet_init();
+		ethernet_start_bridge();
 	} else {
 		ESP_LOGI(TAG, "no saved client, waiting for the first frame on Ethernet");
 		ethernet_init();
+		ethernet_start_bridge();
 		xEventGroupWaitBits(s_events, CLIENT_LEARNED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
 		memcpy(mac, (const uint8_t *) s_status.client_mac, 6);
 		ESP_LOGI(TAG, "learned client " MACSTR_FMT, MAC2ARGS(mac));
@@ -342,7 +598,56 @@ void bridge_start(void)
 	}
 
 	svcnet_start(mac);
-	wifi_sta_start(mac, wifi_rx);
+	wifi_sta_start(mac, wifi_rx, wifi_connected);
+}
+
+/* Setup mode: WRG frames go to the config protocol, everything else to lwIP */
+static esp_err_t setup_eth_rx(esp_eth_handle_t eth, uint8_t *frame, uint32_t len, void *priv, void *info)
+{
+	if (is_config_frame(frame, len)) {
+		rawcfg_input(frame, len);
+		free(frame);
+		return ESP_OK;
+	}
+	return esp_netif_receive(priv, frame, len, NULL);	/* takes the frame */
+}
+
+void bridge_start_setup(void)
+{
+	esp_netif_ip_info_t ip_info;
+	if (esp_netif_str_to_ip4(CONFIG_WRG_SERVICE_IP, &ip_info.ip) != ESP_OK) {
+		ESP_LOGE(TAG, "invalid service address \"%s\"", CONFIG_WRG_SERVICE_IP);
+		return;
+	}
+	ip_info.gw = ip_info.ip;	/* the retro machine's gateway is us */
+	esp_netif_set_ip4_addr(&ip_info.netmask, 255, 255, 255, 0);
+
+	/* our own address on the wire, with a DHCP server: Telnet works without
+	 * any settings on the retro machine. Only in setup mode, where nothing
+	 * is bridged, so no other DHCP server can be confused. */
+	esp_netif_inherent_config_t base = ESP_NETIF_INHERENT_DEFAULT_ETH();
+	base.flags = ESP_NETIF_DHCP_SERVER | ESP_NETIF_FLAG_AUTOUP;
+	base.ip_info = &ip_info;
+	base.get_ip_event = 0;
+	base.lost_ip_event = 0;
+	base.if_key = "ETH_SETUP";
+	base.route_prio = 5;
+	esp_netif_config_t config = { .base = &base, .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH };
+	esp_netif_t *netif = esp_netif_new(&config);
+
+	/* 2 hours: mTCP refuses to start with less than an hour left. After
+	 * setup the user runs DHCP again (the reboot message says so). */
+	uint32_t lease_minutes = 120;
+	esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_IP_ADDRESS_LEASE_TIME,
+			       &lease_minutes, sizeof lease_minutes);
+
+	ethernet_init();
+	ESP_ERROR_CHECK(esp_netif_attach(netif, esp_eth_new_netif_glue(s_eth)));
+	/* replaces the glue's input path (it registers the _info variant too) */
+	ESP_ERROR_CHECK(esp_eth_update_input_path_info(s_eth, setup_eth_rx, netif));
+	ESP_ERROR_CHECK(esp_eth_start(s_eth));
+	ESP_LOGI(TAG, "setup: Ethernet on %s with DHCP", CONFIG_WRG_SERVICE_IP);
+	eventlog_add("setup: Ethernet %s, DHCP", CONFIG_WRG_SERVICE_IP);
 }
 
 void bridge_get_status(bridge_status_t *status)
@@ -350,7 +655,24 @@ void bridge_get_status(bridge_status_t *status)
 	memcpy(status, (const void *) &s_status, sizeof *status);
 
 	TickType_t last = s_last_ipx_ethernet_ii;
-	status->ipx_ethernet_ii = last != 0 && xTaskGetTickCount() - last < pdMS_TO_TICKS(60000);
+	TickType_t now = xTaskGetTickCount();
+	status->ipx_ethernet_ii = last != 0 && now - last < pdMS_TO_TICKS(60000);
+
+	TickType_t asks_seen = s_asks_seen;
+	status->asks_known = asks_seen != 0 && now - asks_seen < pdMS_TO_TICKS(10 * 60 * 1000);
+	status->asks_ip = s_asks_ip;
+	status->asks_age_s = (now - asks_seen) / configTICK_RATE_HZ;
+
+	/* still asking (a request within the last minute), unanswered for 8 s */
+	TickType_t since = s_dhcp_waiting_since, last_request = s_dhcp_last_request;
+	status->dhcp_waiting_s = since ? (now - since) / configTICK_RATE_HZ : 0;
+	status->dhcp_no_answer = since != 0 && now - since >= pdMS_TO_TICKS(8000)
+				 && now - last_request < pdMS_TO_TICKS(60000);
+
+	int stand_in = s_stand_in_count;
+	status->gateway_stand_in = !wifi_sta_up && wifi_sta_unreachable_since_boot();
+	status->stand_in_count = stand_in;
+	status->stand_in_ip = stand_in > 0 ? s_stand_in[stand_in - 1].target : 0;
 }
 
 int bridge_get_other_macs(bridge_other_mac_t *macs, int max)

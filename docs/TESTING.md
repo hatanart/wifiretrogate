@@ -54,6 +54,15 @@ Other results:
 - A 6502 machine's open Telnet session survived moving its cable from the wired
   LAN to a WifiRetroGate.
 - Telnet console on `192.0.2.1`, setup mode from a phone, OLED display: work.
+- Setup mode from a 6502 machine on the cable: DHCP (`192.0.2.x`),
+  `telnet 192.0.2.1`, `wifi add`, `reboot`, then connected to that network:
+  works. The machine's IP address appears on the display.
+- An open Telnet session from the 6502 machine survived reflashing the
+  firmware (the board comes back with the same cloned MAC).
+- Setup mode from DOS with mTCP: `DHCP`, then `telnet 192.0.2.1`: works (mTCP
+  needs a lease of at least an hour, so setup mode gives 2 hours). Typed
+  characters echo in mTCP Telnet and in the 6502 machine's Telnet.
+- `WRG.COM` in setup mode: works. DOOM over IPX in bridge mode: works.
 
 ## Over-the-air capture
 
