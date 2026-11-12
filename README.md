@@ -1,7 +1,7 @@
 # WifiRetroGate
 
 <p align="center">
-  <img src="docs/wifiretrogate.jpg" alt="WifiRetroGate on a WT32-ETH01 board with an OLED display showing the Wi-Fi link status" width="480">
+  <img src="docs/wifiretrogate.jpg" alt="WifiRetroGate on a WT32-ETH01 board with an OLED display waiting for a client" width="480">
 </p>
 
 A small Wi-Fi adapter for **one vintage Ethernet computer**: plug a DOS PC,
@@ -393,5 +393,6 @@ for anything, no attribution required.
 
 Third-party parts: the firmware is built with Espressif's ESP-IDF (Apache 2.0,
 not included here; its closed Wi-Fi libraries have their own license). The
-display font in `firmware/main/font5x8.c` is generated from the X11 misc-fixed
-5x8 font, which is in the public domain.
+display font in `firmware/main/font5x8.c` is a 5x7 font: the ASCII characters
+follow the character set of the Hitachi HD44780 LCD controller (A00 ROM), the
+Latin-1 characters were drawn for this project.
