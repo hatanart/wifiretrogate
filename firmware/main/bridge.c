@@ -125,7 +125,12 @@ static bool udp_ports(const uint8_t *frame, uint32_t len, int *src_port, int *ds
 	    || frame[23] != 17) {
 		return false;
 	}
-	uint32_t udp = 14 + (frame[14] & 0x0f) * 4;
+	/* only whole headers (IHL 5 or more) and the first fragment carry UDP ports */
+	uint32_t ihl = frame[14] & 0x0f;
+	if (ihl < 5 || ((frame[20] & 0x1f) | frame[21]) != 0) {
+		return false;
+	}
+	uint32_t udp = 14 + ihl * 4;
 	if (len < udp + 8) {
 		return false;
 	}
@@ -418,6 +423,12 @@ static esp_err_t eth_rx(esp_eth_handle_t eth, uint8_t *frame, uint32_t len, void
 {
 	const uint8_t *src = frame + 6;
 
+	if (len < 14) {
+		/* no whole Ethernet header (the driver should never pass one) */
+		free(frame);
+		return ESP_OK;
+	}
+
 	if (is_config_frame(frame, len)) {
 		/* configuration tool: handled here, never forwarded to Wi-Fi */
 		rawcfg_input(frame, len);
@@ -484,6 +495,11 @@ static esp_err_t wifi_rx(void *buffer, uint16_t buffer_len, void *eb)
 	uint8_t *frame = buffer;
 	uint32_t len = buffer_len;
 
+	if (len < 14) {
+		/* no whole Ethernet header (the driver should never pass one) */
+		esp_wifi_internal_free_rx_buffer(eb);
+		return ESP_OK;
+	}
 	uint32_t offset = strip_bridge_tunnel(frame, &len);
 	if (offset) {
 		frame += offset;

@@ -104,11 +104,13 @@ static void handle_request(const uint8_t *frame, uint32_t len, output_t *output)
 
 static void rawcfg_task(void *arg)
 {
-	output_t output = { .text = malloc(OUTPUT_MAX) };
+	/* static: no allocation that could fail; only this task uses it */
+	static char text[OUTPUT_MAX];
+	output_t output = { .text = text };
 
 	for (;;) {
 		request_t *request;
-		xQueueReceive(s_queue, &request, portMAX_DELAY);
+		xQueueReceive((QueueHandle_t) arg, &request, portMAX_DELAY);
 		handle_request(request->frame, request->len, &output);
 		free(request);
 	}
@@ -117,8 +119,16 @@ static void rawcfg_task(void *arg)
 void rawcfg_input(const uint8_t *frame, uint32_t len)
 {
 	if (s_queue == NULL) {
-		s_queue = xQueueCreate(4, sizeof(request_t *));
-		xTaskCreate(rawcfg_task, "rawcfg", 4096, NULL, 3, NULL);
+		/* started on first use; if that fails, the next frame tries again */
+		QueueHandle_t queue = xQueueCreate(4, sizeof(request_t *));
+		if (queue == NULL) {
+			return;
+		}
+		if (xTaskCreate(rawcfg_task, "rawcfg", 4096, queue, 3, NULL) != pdPASS) {
+			vQueueDelete(queue);
+			return;
+		}
+		s_queue = queue;
 	}
 
 	request_t *request = malloc(sizeof *request + len);
