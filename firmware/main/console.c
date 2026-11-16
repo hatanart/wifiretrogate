@@ -145,7 +145,7 @@ static void cmd_status(int argc, char **argv)
 	for (int i = 0; i < ip_count; i++) {
 		const uint8_t *a = (const uint8_t *) &ips[i];
 		out("%s%u.%u.%u.%u%s\n", i == 0 ? "IP      " : "        ", a[0], a[1], a[2], a[3],
-		    i == 0 && ip_count > 1 ? "  (newest)" : "");
+		    bridge_ip_is_link_local(ips[i]) ? "  (link-local: self-assigned, no DHCP)" : "");
 	}
 	if (b.asks_known) {
 		const uint8_t *a = (const uint8_t *) &b.asks_ip;

@@ -91,10 +91,9 @@ aa aa 03 00 00 00  00 4a   aa aa 03 00 00 f8  81 37  ff ff ...
 ```
 
 The access point removes the RFC 1042 header and restores bytes 12-13, so
-length frames still arrive on the wire unchanged. There is no software in the
-ESP-IDF Wi-Fi libraries that builds these headers, so it is done by the
-hardware or its firmware and cannot be changed through the normal transmit
-path. Consequences:
+length frames still arrive on the wire unchanged. The header is written in
+software, by `ieee80211_encap_esfbuf()` in Espressif's closed `libnet80211.a`,
+which has no 802.1H table. Consequences:
 
 | Sending from behind WifiRetroGate | arrives on the wire as |
 |---|---|
@@ -109,9 +108,12 @@ not configured for. Ethernet II IPX therefore works between WifiRetroGates.
 For everything else, 802.2 is the format that works everywhere; the firmware
 shows a hint when the client sends Ethernet II IPX.
 
-A real fix would need either an unknown hardware option or sending raw 802.11
-frames (`esp_wifi_80211_tx`), which are not encrypted, with CCMP done in
-software. Not attempted.
+A native fix was tried (2026-11): a patched copy of the library in which the
+firmware takes over that function and writes `00 00 F8` for IPX and AARP. The
+ESP32 then sent byte-for-byte what a correct 802.1H sender sends, but the
+access points tested did not deliver it as Ethernet II on 2.4 GHz (see
+`TESTING.md`), and it depends on patching a closed library. So WifiRetroGate
+keeps the extra copy, and the code is not included.
 
 ### 2. Bridge-tunnel frames are received unconverted
 

@@ -55,11 +55,15 @@ typedef struct {
 int bridge_get_other_macs(bridge_other_mac_t *macs, int max);
 
 /* The client's IPv4 addresses (network byte order), newest first: the newest
- * always, others if seen within the last 10 minutes. Learned from the
- * sender address of its ARP packets, or from the source address of its IPv4
- * packets until the first ARP. Returns the count (0 = none seen yet). */
+ * always, others if seen within the last 10 minutes. Link-local addresses
+ * (169.254.x.x) come after the others. Learned from the sender address of its
+ * ARP packets, or from the source address of its IPv4 packets until the
+ * first ARP. Returns the count (0 = none seen yet). */
 #define BRIDGE_MAX_CLIENT_IPS	4
 int bridge_get_client_ips(uint32_t *ips, int max);
+
+/* 169.254.x.x: self-assigned when DHCP did not answer */
+bool bridge_ip_is_link_local(uint32_t ip);
 
 /* Send a frame of our own on the Ethernet side (config protocol replies) */
 esp_err_t bridge_eth_send(const void *frame, size_t len);

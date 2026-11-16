@@ -298,7 +298,10 @@ saved.
 
 The IP address is the one the retro machine uses, learned from its own ARP
 packets: `IP   -` until it has used IP, `+1` when it used another address in
-the last 10 minutes (`status` lists them all). `ASKS` is the last address it
+the last 10 minutes (`status` lists them all). A self-assigned `169.254.x.x`
+address is shown only when the machine has no other: then DHCP did not
+answer, but the machine can still be reached at that address from the
+same network. `ASKS` is the last address it
 looked for with ARP, normally its gateway: with an unknown device it tells
 which network the device expects. `DHCP: no answer` means it keeps asking for
 an address and nothing answers (no DHCP on that network, or no Wi-Fi). Handy

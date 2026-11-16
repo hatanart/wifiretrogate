@@ -42,6 +42,20 @@ Note: a listener on Wi-Fi must have power saving off
 | raw 802.3 | OK | OK (length field repaired) |
 | SNAP | OK | OK (length field repaired) |
 
+Native 802.1H experiment (2026-11, not included): a firmware build that sent
+Ethernet II IPX with a correct bridge-tunnel header (checked byte for byte in
+the frame handed to the Wi-Fi hardware). The same correct frame arrived on the
+wire as:
+
+| Access point | arrives as |
+|---|---|
+| UniFi UAP-AC-PRO, 2.4 GHz | raw 802.3 (a Raspberry Pi 3B+ gets the same) |
+| UniFi UAP-AC-PRO, 5 GHz (Raspberry Pi; the ESP32 has no 5 GHz) | Ethernet II |
+| iPhone hotspot (received by a laptop on the hotspot) | bridge-tunnel, unconverted |
+
+So on 2.4 GHz the extra copy (see `HOW-IT-WORKS.md`) stays the better choice.
+802.2 worked through every one of them.
+
 Real games: **Doom** (`IPXSETUP -nodes 2`) between a DOS PC with a VIA Rhine
 card behind WifiRetroGate (Novell ODI, no `NET.CFG`, so 802.2) and a wired DOS
 PC: starts and plays well.
@@ -63,6 +77,9 @@ Other results:
   needs a lease of at least an hour, so setup mode gives 2 hours). Typed
   characters echo in mTCP Telnet and in the 6502 machine's Telnet.
 - `WRG.COM` in setup mode: works. DOOM over IPX in bridge mode: works.
+- MiSTer FPGA (Linux): DHCP and the IP on the display work. It also uses a
+  self-assigned 169.254.x.x address at boot; the display shows the DHCP
+  address, `status` lists both.
 
 ## Over-the-air capture
 

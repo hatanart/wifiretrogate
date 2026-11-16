@@ -140,13 +140,17 @@ static void send_escaped(httpd_req_t *req, const char *text)
 		}
 	}
 	buffer[n] = '\0';
-	httpd_resp_sendstr_chunk(req, buffer);
+	if (n > 0) {
+		/* an empty chunk would end the page */
+		httpd_resp_sendstr_chunk(req, buffer);
+	}
 }
 
 static esp_err_t redirect_home(httpd_req_t *req)
 {
 	httpd_resp_set_status(req, "303 See Other");
 	httpd_resp_set_hdr(req, "Location", "/");
+	httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 	return httpd_resp_send(req, NULL, 0);
 }
 
@@ -161,18 +165,23 @@ static const char PAGE_HEAD[] =
 	"table{width:100%;border-collapse:collapse}td{padding:.3em 0;border-bottom:1px solid #ddd}"
 	"td.r{text-align:right}.msg{background:#eef;padding:.5em}"
 	"form.inline{margin:0}form.inline button{width:auto;margin:0;padding:.2em .6em}"
+	".pw{position:relative;display:block}.pw input{padding-right:2.5em}"
+	".pw .eye{position:absolute;right:0;top:.2em;width:2.5em;margin:0;background:none;border:0}"
 	"</style></head><body><h1>WifiRetroGate</h1>";
 
 static esp_err_t page_get(httpd_req_t *req)
 {
 	char query[32];
 	char line[96];
+	setup_activity();	/* someone is using the page */
 
 	if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK && strstr(query, "scan")) {
 		scan_networks();
 	}
 
 	httpd_resp_set_type(req, "text/html");
+	/* always fresh: after a save the browser must not show its cached copy */
+	httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 	httpd_resp_sendstr_chunk(req, PAGE_HEAD);
 
 	httpd_resp_sendstr_chunk(req, "<p class=msg>");
@@ -181,8 +190,9 @@ static esp_err_t page_get(httpd_req_t *req)
 
 	/* add a network: pick from the scan or type a name (hidden networks) */
 	httpd_resp_sendstr_chunk(req,
-		"<h2>Add a network</h2><form method=post action=/add>"
-		"<label>Network name<input name=ssid list=nets required maxlength=32 autocapitalize=none></label>"
+		"<h2>Add a network</h2><form method=post action=/add autocomplete=off>"
+		"<label>Network name<input name=ssid list=nets required maxlength=32 autocapitalize=none"
+		" autocomplete=off></label>"
 		"<datalist id=nets>");
 	for (int i = 0; i < s_scan_count; i++) {
 		if (s_scan[i].ssid[0] == '\0') {
@@ -194,7 +204,10 @@ static esp_err_t page_get(httpd_req_t *req)
 	}
 	httpd_resp_sendstr_chunk(req,
 		"</datalist><label>Password (empty for an open network)"
-		"<input name=password type=password maxlength=63></label>"
+		"<span class=pw><input name=password id=pw type=password maxlength=64"
+		" autocomplete=new-password><button type=button class=eye title='Show password'"
+		" onclick=\"var p=document.getElementById('pw');p.type=p.type=='password'?'text':'password'\">"
+		"&#128065;</button></span></label>"
 		"<button>Save</button></form>");
 
 	/* networks in range */
@@ -221,7 +234,10 @@ static esp_err_t page_get(httpd_req_t *req)
 		const wrg_network_t *network = settings_network(i);
 		httpd_resp_sendstr_chunk(req, "<tr><td>");
 		send_escaped(req, network->ssid);
-		httpd_resp_sendstr_chunk(req, network->password[0] ? "" : " (open)");
+		if (network->password[0] == '\0') {
+			/* never send an empty chunk: that ends the page */
+			httpd_resp_sendstr_chunk(req, " (open)");
+		}
 		httpd_resp_sendstr_chunk(req,
 			"</td><td class=r><form class=inline method=post action=/forget>"
 			"<input type=hidden name=ssid value=\"");
@@ -239,6 +255,7 @@ static esp_err_t page_get(httpd_req_t *req)
 static esp_err_t add_post(httpd_req_t *req)
 {
 	char body[512], ssid[WRG_SSID_MAX * 3 + 1], password[WRG_PASSWORD_MAX * 3 + 1];
+	setup_activity();	/* someone is using the page */
 
 	if (read_body(req, body, sizeof body) != ESP_OK) {
 		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad form");
@@ -260,6 +277,7 @@ static esp_err_t add_post(httpd_req_t *req)
 static esp_err_t forget_post(httpd_req_t *req)
 {
 	char body[128], ssid[WRG_SSID_MAX * 3 + 1];
+	setup_activity();	/* someone is using the page */
 
 	if (read_body(req, body, sizeof body) != ESP_OK) {
 		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad form");

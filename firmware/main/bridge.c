@@ -298,7 +298,26 @@ int bridge_get_client_ips(uint32_t *ips, int max)
 		used[newest] = true;
 		ips[n++] = ip[newest];
 	}
+
+	/* link-local addresses (169.254.x.x, self-assigned when DHCP did not
+	 * answer) after the others: shown first only when there is nothing else */
+	uint32_t sorted[BRIDGE_MAX_CLIENT_IPS];
+	int k = 0;
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < n; i++) {
+			if (bridge_ip_is_link_local(ips[i]) == (pass == 1)) {
+				sorted[k++] = ips[i];
+			}
+		}
+	}
+	memcpy(ips, sorted, n * sizeof *ips);
 	return n;
+}
+
+bool bridge_ip_is_link_local(uint32_t ip)
+{
+	const uint8_t *a = (const uint8_t *) &ip;
+	return a[0] == 169 && a[1] == 254;
 }
 
 static void note_other_mac(const uint8_t *mac)
@@ -346,10 +365,12 @@ static bool learnable(const uint8_t *frame, uint32_t len)
  * "bridge-tunnel" header (OUI 00-00-F8) instead of the RFC 1042 header, so
  * that the receiver can tell Ethernet II IPX from 802.2 SNAP IPX.
  *
- * Measured on the ESP32 (2026-10-15): the hardware wraps every frame in an
- * RFC 1042 header and treats bytes 12..13 as the EtherType even when they are
- * a length; the AP unwraps it again. So length frames (802.2, raw 802.3,
- * SNAP) pass unchanged, but a real bridge-tunnel header can never be sent.
+ * Measured on the ESP32 (2026-10-15): the Wi-Fi library (ieee80211_encap_esfbuf
+ * in libnet80211) wraps every frame in an RFC 1042 header and treats bytes
+ * 12..13 as the EtherType even when they are a length; the AP unwraps it again.
+ * So length frames (802.2, raw 802.3, SNAP) pass unchanged, but a real
+ * bridge-tunnel header is never sent. (Patching the library to send one was
+ * tried in 2026-11: APs tested on 2.4 GHz still did not deliver Ethernet II.)
  *  - sending Ethernet II IPX: the AP turns it into SNAP. We send it as is
  *    (wired machines and laptops get SNAP) and a second copy as a length
  *    frame with a bridge-tunnel header, which another WifiRetroGate turns
